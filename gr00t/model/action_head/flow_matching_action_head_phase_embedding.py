@@ -1,0 +1,637 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from dataclasses import dataclass, field
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+from torch.distributions import Beta
+from transformers import PretrainedConfig
+from transformers.feature_extraction_utils import BatchFeature
+
+from gr00t.model.action_head.action_encoder import SinusoidalPositionalEncoding, swish
+
+from .cross_attention_dit import DiT, SelfAttentionTransformer
+
+
+class CategorySpecificLinear(nn.Module):
+    def __init__(self, num_categories, input_dim, hidden_dim):
+        super().__init__()
+        self.num_categories = num_categories
+        # For each category, we have separate weights and biases.
+        self.W = nn.Parameter(0.02 * torch.randn(num_categories, input_dim, hidden_dim))
+        self.b = nn.Parameter(torch.zeros(num_categories, hidden_dim))
+
+    def forward(self, x, cat_ids):
+        selected_W = self.W[cat_ids]
+        selected_b = self.b[cat_ids]
+        return torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
+
+
+class CategorySpecificMLP(nn.Module):
+    def __init__(self, num_categories, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.num_categories = num_categories
+        self.layer1 = CategorySpecificLinear(num_categories, input_dim, hidden_dim)
+        self.layer2 = CategorySpecificLinear(num_categories, hidden_dim, output_dim)
+
+    def forward(self, x, cat_ids):
+        hidden = F.relu(self.layer1(x, cat_ids))
+        return self.layer2(hidden, cat_ids)
+
+
+class MultiEmbodimentActionEncoder(nn.Module):
+    def __init__(self, action_dim, hidden_size, num_embodiments):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_embodiments = num_embodiments
+
+        # W1: R^{w x d}, W2: R^{w x 2w}, W3: R^{w x w}
+        self.W1 = CategorySpecificLinear(num_embodiments, action_dim, hidden_size)  # (d -> w)
+        self.W2 = CategorySpecificLinear(num_embodiments, 2 * hidden_size, hidden_size)  # (2w -> w)
+        self.W3 = CategorySpecificLinear(num_embodiments, hidden_size, hidden_size)  # (w -> w)
+        self.pos_encoding = SinusoidalPositionalEncoding(hidden_size)
+
+    def forward(self, actions, timesteps, cat_ids):
+        """
+        actions:   shape (B, T, action_dim)
+        timesteps: shape (B,)  -- a single scalar per batch item
+        cat_ids:   shape (B,)
+        returns:   shape (B, T, hidden_size)
+        """
+        B, T, _ = actions.shape
+
+        # 1) Expand each batch's single scalar time 'tau' across all T steps
+        #    so that shape => (B, T)
+        #    e.g. if timesteps is (B,), replicate across T
+        if timesteps.dim() == 1 and timesteps.shape[0] == B:
+            # shape (B,) => (B,T)
+            timesteps = timesteps.unsqueeze(1).expand(-1, T)
+        else:
+            raise ValueError(
+                "Expected `timesteps` to have shape (B,) so we can replicate across T."
+            )
+
+        # 2) Standard action MLP step for shape => (B, T, w)
+        a_emb = self.W1(actions, cat_ids)
+
+        # 3) Get the sinusoidal encoding (B, T, w)
+        tau_emb = self.pos_encoding(timesteps).to(dtype=a_emb.dtype)
+
+        # 4) Concat along last dim => (B, T, 2w), then W2 => (B, T, w), swish
+        x = torch.cat([a_emb, tau_emb], dim=-1)
+        x = swish(self.W2(x, cat_ids))
+
+        # 5) Finally W3 => (B, T, w)
+        x = self.W3(x, cat_ids)
+        return x
+
+
+@dataclass
+class FlowmatchingActionHeadConfig(PretrainedConfig):
+    """NOTE: N1.5 uses XEmbFlowmatchingPolicyHeadConfig as action head"""
+
+    add_pos_embed: bool = field(
+        default=True, metadata={"help": "Whether to add positional embedding"}
+    )
+    model_dtype: str = field(default="float32", metadata={"help": "Model data type."})
+    diffusion_model_cfg: dict = field(
+        default=None, metadata={"help": "Diffusion model configuration."}
+    )
+    input_embedding_dim: int = field(
+        default=1536, metadata={"help": "Input embedding channel dimension."}
+    )
+    backbone_embedding_dim: int = field(
+        default=1536, metadata={"help": "Backbone embedding channel dimension."}
+    )
+
+    hidden_size: int = field(default=1024, metadata={"help": "Input embedding dimension."})
+    max_seq_len: int = field(default=1024, metadata={"help": "Maxium Sequence Length"})
+    action_dim: int = field(default=None, metadata={"help": "Action dimension."})
+    action_horizon: int = field(default=None, metadata={"help": "Action horizon."})
+    noise_beta_alpha: float = field(default=1.5, metadata={"help": ""})
+    noise_beta_beta: float = field(default=1.0, metadata={"help": ""})
+    noise_s: float = field(
+        default=0.999, metadata={"help": "Flow matching noise Beta distribution s."}
+    )
+    num_timestep_buckets: int = field(
+        default=1000, metadata={"help": "Number of timestep discretization buckets."}
+    )
+    num_inference_timesteps: int = field(
+        default=None,
+        metadata={"help": "Number of inference steps for noise diffusion."},
+    )
+    max_num_embodiments: int = field(default=32, metadata={"help": "Number of embodiments."})
+    tune_projector: bool = field(default=True, metadata={"help": "Whether to tune the projector."})
+    tune_diffusion_model: bool = field(
+        default=True, metadata={"help": "Whether to tune the diffusion model."}
+    )
+    load_pretrained_det_decode_layer_path: str = field(
+        default=None, metadata={"help": "Path to pretrained detection model."}
+    )
+    detection_coeff: float = field(default=1.0, metadata={"help": "Detection coefficient."})
+
+    freeze_decode_layer: bool = field(default=False)
+    expand_batch: int = field(default=None)
+    use_vlln: bool = field(default=True)
+
+    vl_self_attention_cfg: dict = field(default=None)
+    num_target_vision_tokens: int = field(
+        default=32, metadata={"help": "Number of target vision tokens."}
+    )
+
+    # 🟢 [新增] 关键帧计数 Token 的最大数量 (例如任务最多有50个关键帧)
+    max_keyframe_count: int = field(
+        default=3, 
+        metadata={"help": "Maximum number of keyframes for count embedding."}
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+class FlowmatchingActionHead(nn.Module):
+    config_class = FlowmatchingActionHeadConfig
+    supports_gradient_checkpointing = True
+
+    def __init__(
+        self,
+        config: FlowmatchingActionHeadConfig,
+    ):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.input_embedding_dim = config.input_embedding_dim
+
+        self.model = DiT(**config.diffusion_model_cfg)
+        self.action_dim = config.action_dim
+        self.action_horizon = config.action_horizon
+        self.num_inference_timesteps = config.num_inference_timesteps
+
+        self.state_encoder = CategorySpecificMLP(
+            num_categories=config.max_num_embodiments,
+            input_dim=config.max_state_dim,
+            hidden_dim=self.hidden_size,
+            output_dim=self.input_embedding_dim,
+        )
+        self.action_encoder = MultiEmbodimentActionEncoder(
+            action_dim=config.action_dim,
+            hidden_size=self.input_embedding_dim,
+            num_embodiments=config.max_num_embodiments,
+        )
+        self.action_decoder = CategorySpecificMLP(
+            num_categories=config.max_num_embodiments,
+            input_dim=self.hidden_size,
+            hidden_dim=self.hidden_size,
+            output_dim=self.action_dim,
+        )
+        self.future_tokens = nn.Embedding(config.num_target_vision_tokens, self.input_embedding_dim)
+        nn.init.normal_(self.future_tokens.weight, mean=0.0, std=0.02)
+
+        self.vlln = (
+            nn.LayerNorm(config.backbone_embedding_dim) if config.use_vlln else nn.Identity()
+        )
+        self.vl_self_attention = (
+            SelfAttentionTransformer(**config.vl_self_attention_cfg)
+            if config.use_vlln
+            else nn.Identity()
+        )
+
+        if config.add_pos_embed:
+            self.position_embedding = nn.Embedding(config.max_seq_len, self.input_embedding_dim)
+            nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
+
+        self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
+        self.num_timestep_buckets = config.num_timestep_buckets
+
+
+        # 🟢 [新增] 关键帧计数 Embedding 层
+        self.kf_count_embedding = nn.Embedding(config.max_keyframe_count, self.input_embedding_dim)
+        nn.init.normal_(self.kf_count_embedding.weight, mean=0.0, std=0.02)
+
+
+        self.config = config
+        self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)
+
+    def set_trainable_parameters(self, tune_projector: bool, tune_diffusion_model: bool):
+        self.tune_projector = tune_projector
+        self.tune_diffusion_model = tune_diffusion_model
+        for p in self.parameters():
+            p.requires_grad = True
+        if not tune_projector:
+            self.state_encoder.requires_grad_(False)
+            self.action_encoder.requires_grad_(False)
+            self.action_decoder.requires_grad_(False)
+            if self.config.add_pos_embed:
+                self.position_embedding.requires_grad_(False)
+        if not tune_diffusion_model:
+            self.model.requires_grad_(False)
+        print(f"Tune action head projector: {self.tune_projector}")
+        print(f"Tune action head diffusion model: {self.tune_diffusion_model}")
+        # Check if any parameters are still trainable. If not, print a warning.
+        if not tune_projector and not tune_diffusion_model:
+            for name, p in self.named_parameters():
+                if p.requires_grad:
+                    print(f"Action head trainable parameter: {name}")
+        if not any(p.requires_grad for p in self.parameters()):
+            print("Warning: No action head trainable parameters found.")
+
+    def set_frozen_modules_to_eval_mode(self):
+        """
+        Huggingface will call model.train() at each training_step. To ensure
+        the expected behaviors for modules like dropout, batchnorm, etc., we
+        need to call model.eval() for the frozen modules.
+        """
+        if self.training:
+            if not self.tune_projector:
+                self.state_encoder.eval()
+                self.action_encoder.eval()
+                self.action_decoder.eval()
+                if self.config.add_pos_embed:
+                    self.position_embedding.eval()
+            if not self.tune_diffusion_model:
+                self.model.eval()
+
+    def sample_time(self, batch_size, device, dtype):
+        sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
+        return (self.config.noise_s - sample) / self.config.noise_s
+
+    def prepare_input(self, batch: dict) -> BatchFeature:
+        return BatchFeature(data=batch)
+    
+    from typing import Optional # 确保文件开头有导入 Optional
+    def process_backbone_output(self, backbone_output: BatchFeature,attention_mask: Optional[torch.Tensor] = None) -> BatchFeature:
+        backbone_features = backbone_output["backbone_features"]
+        backbone_features = self.vlln(backbone_features)
+
+        # 传递 mask
+        backbone_features = self.vl_self_attention(backbone_features, attention_mask=attention_mask)
+
+        backbone_features = self.vl_self_attention(backbone_features)
+        backbone_output["backbone_features"] = backbone_features
+        return backbone_output
+
+    # def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
+    #     # Set frozen modules to eval
+    #     self.set_frozen_modules_to_eval_mode()
+    #     backbone_output = self.process_backbone_output(backbone_output)
+    #     if self.config.expand_batch is not None:
+    #         for k, v in backbone_output.items():
+    #             ndim = len(v.shape)
+    #             factors = [self.config.expand_batch]
+    #             while len(factors) < ndim:
+    #                 factors.append(1)
+    #             factors = tuple(factors)
+    #             expanded = v.repeat(*factors)
+    #             backbone_output[k] = expanded
+
+    #         for k, v in action_input.items():
+    #             ndim = len(v.shape)
+    #             factors = [self.config.expand_batch]
+    #             while len(factors) < ndim:
+    #                 factors.append(1)
+    #             factors = tuple(factors)
+    #             expanded = v.repeat(*factors)
+    #             action_input[k] = expanded
+
+    #     # Get vision and language embeddings.
+    #     vl_embs = backbone_output.backbone_features
+    #     device = vl_embs.device
+
+    #     # Get embodiment ID.
+    #     embodiment_id = action_input.embodiment_id
+
+    #     # Embed state.
+    #     state_features = self.state_encoder(action_input.state, embodiment_id)
+
+    #     # Embed noised action trajectory.
+    #     actions = action_input.action
+    #     noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
+    #     t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
+    #     t = t[:, None, None]  # shape (B,1,1) for broadcast
+
+    #     noisy_trajectory = (1 - t) * noise + t * actions
+    #     velocity = actions - noise
+
+    #     # Convert (continuous) t -> discrete if needed
+    #     t_discretized = (t[:, 0, 0] * self.num_timestep_buckets).long()
+    #     action_features = self.action_encoder(noisy_trajectory, t_discretized, embodiment_id)
+
+    #     # Maybe add position embedding.
+    #     if self.config.add_pos_embed:
+    #         pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+    #         pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+    #         action_features = action_features + pos_embs
+
+    #     # Join vision, language, state and action embedding along sequence dimension.
+    #     future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
+    #     sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+
+    #     vl_attn_mask = backbone_output.backbone_attention_mask
+
+    #     model_output = self.model(
+    #         hidden_states=sa_embs,
+    #         encoder_hidden_states=vl_embs,
+    #         encoder_attention_mask=vl_attn_mask,
+    #         timestep=t_discretized,
+    #         return_all_hidden_states=False,  # NOTE (YL): not using flare now
+    #     )
+    #     pred = self.action_decoder(model_output, embodiment_id)
+    #     pred_actions = pred[:, -actions.shape[1] :]
+
+    #     # Slice out only the action portion of pred and target.
+    #     action_mask = action_input.action_mask
+    #     loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
+    #     loss = loss.sum() / action_mask.sum()
+    #     output_dict = {
+    #         "loss": loss,
+    #     }
+    #     return BatchFeature(data=output_dict)
+
+    def forward(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:  
+        # 1) 冻结模块设 eval
+        self.set_frozen_modules_to_eval_mode()
+
+        # ------------------ 1. VL Tokens Masking & VLLN/VLSA ------------------
+        # 1.1) 获取 VL 基础张量
+        vl_embs_pre_expand = backbone_output.backbone_features
+        # vl_attn_mask: [B, L_vl], 1 有效, 0 填充
+        vl_attn_mask_original = backbone_output.backbone_attention_mask 
+        device = vl_embs_pre_expand.device
+        dtype = vl_embs_pre_expand.dtype
+
+        # 💥 1.2) 构造 VL Self-Attention 布尔掩码 [修正版]
+        # 实验证明: True = 保留(有效), False = 屏蔽(填充)
+        # 原始 mask: 1=有效, 0=填充
+        # 逻辑: (mask > 0) -> 1变成True(保留), 0变成False(屏蔽)
+        vl_self_attn_mask_bool = (vl_attn_mask_original > 0) # [B, L_vl] 
+
+        # 🔥【修改点 1】转换 VL Mask 为加性 Mask
+        # vl_additive_mask = to_additive_mask(vl_attn_mask_original)
+        
+        # 1.3) 执行 VLLN 和 VL Self-Attention
+        backbone_output = self.process_backbone_output(
+            backbone_output, 
+            attention_mask=vl_self_attn_mask_bool
+            # attention_mask=vl_additive_mask
+        )
+
+        # ------------------ 2) 可选：expand_batch ------------------
+        if self.config.expand_batch is not None:
+            for k, v in backbone_output.items():
+                ndim = len(v.shape)
+                factors = [self.config.expand_batch] + [1] * (ndim - 1)
+                backbone_output[k] = v.repeat(*factors)
+
+            for k, v in action_input.items():
+                ndim = len(v.shape)
+                factors = [self.config.expand_batch] + [1] * (ndim - 1)
+                action_input[k] = v.repeat(*factors)
+
+        # ------------------ 3. 取最终定型的基本张量 ------------------
+        vl_embs = backbone_output.backbone_features# [B, L_vl, D]
+        vl_attn_mask = backbone_output.backbone_attention_mask # [B, L_vl]
+        
+        B = vl_embs.shape[0]
+
+        embodiment_id = action_input.embodiment_id  # [B]
+        state = action_input.state # [B, T_state, state_dim]
+        state_mask = action_input.state_mask # [B, T_state, ...]
+        actions = action_input.action # [B, T_action, action_dim]
+        action_mask = action_input.action_mask  # [B, T_action, ...]
+        
+        #只使用当前时刻的state
+        # ========== 🔴 [新增] 强制截断：只保留最后一个时间步 (当前状态) ==========
+        # 假设 T_state 维度在 index 1
+        # 使用切片 [-1:] 保持维度不变: [B, T, D] -> [B, 1, D]
+        # if state.shape[1] > 1:
+        #     state = state[:, -1:, :]
+            
+        #     # ⚠️ 必须同时截断 mask，否则后续计算 attention mask 会报错
+        #     if state_mask.ndim == 3:
+        #         state_mask = state_mask[:, -1:, :] # [B, 1, D]
+        #     else:
+        #         state_mask = state_mask[:, -1:]    # [B, 1]
+        # # ====================================================================
+
+        # ------------------ 4) 编码 state/action (保持不变) ------------------
+        state_features = self.state_encoder(state, embodiment_id) # [B, T_state, C]
+
+
+        # =================================================================
+        # 🟢 [新增] 1. 获取并 Embedding 关键帧计数 (Keyframe Counts)
+        # =================================================================
+        if hasattr(action_input, "keyframe_counts"):
+            # 取出数据，确保维度 [B]
+            kf_counts = action_input.keyframe_counts
+            if kf_counts.ndim == 2: kf_counts = kf_counts.squeeze(-1)
+        else:
+            # 兼容性默认值
+            kf_counts = torch.zeros((B,), dtype=torch.long, device=device)
+        
+        # 截断
+        kf_counts = torch.clamp(kf_counts, min=0, max=self.config.max_keyframe_count - 1)
+        # Embedding: [B] -> [B, 1, D]
+        kf_count_feature = self.kf_count_embedding(kf_counts).unsqueeze(1)
+
+        
+        noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
+        t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
+        t = t[:, None, None] # [B, 1, 1]
+
+        noisy_trajectory = (1.0 - t) * noise + t * actions
+        velocity = actions - noise 
+
+        t_discretized = (t[:, 0, 0] * self.num_timestep_buckets).long() # [B]
+        action_features = self.action_encoder( 
+            noisy_trajectory,
+            t_discretized,
+            embodiment_id,
+        )
+
+        if self.config.add_pos_embed:
+            pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+            pos_embs = self.position_embedding(pos_ids).unsqueeze(0) 
+            action_features = action_features + pos_embs
+
+        # ------------------ 7) 拼成 SA 输入序列 ------------------
+        T_future = self.config.num_target_vision_tokens
+        future_tokens = self.future_tokens.weight.unsqueeze(0).expand(B, -1, -1) # [B, T_future, C]
+
+        # sa_embs = torch.cat(
+        #     [state_features, future_tokens, action_features],
+        #     dim=1,
+        # ) # [B, L_total, C]
+
+
+        # 🟢 [修改] 2. 拼接到 sa_embs 序列中
+        # 顺序建议: [State | KF_Count | Future | Action]
+        sa_embs = torch.cat(
+            [state_features, kf_count_feature, future_tokens, action_features],
+            dim=1,
+        ) # [B, L_total, C]
+
+
+        # ------------------ 8. 构造 DiT 掩码 ------------------
+        # 8.0) 构造 SA Mask (1/0)
+        # 将 state_mask 转换为 [B, T_state] 的 1/0
+        if state_mask.ndim == 3:
+            state_time_mask = (state_mask.abs().sum(dim=-1) > 0).to(torch.float32)
+        else:
+            state_time_mask = state_mask.to(torch.float32)
+
+        future_time_mask = torch.ones((B, T_future), device=device, dtype=torch.float32)
+
+        if action_mask.ndim == 3:
+            action_time_mask = (action_mask.abs().sum(dim=-1) > 0).to(torch.float32) 
+        else:
+            action_time_mask = action_mask.to(torch.float32)
+        
+        # 🟢 [新增] 3. 构造 KF Count Mask (永远有效，全为1)
+        kf_count_time_mask = torch.ones((B, 1), device=device, dtype=dtype)
+        # 🟢 [修改] 4. 拼接 Mask (顺序必须与 sa_embs 一致！)
+        sa_mask = torch.cat(
+            [state_time_mask, kf_count_time_mask, future_time_mask, action_time_mask], 
+            dim=1
+        )
+
+        # sa_mask = torch.cat([state_time_mask, future_time_mask, action_time_mask], dim=1) # [B, L_total]
+
+        # 💥 8.1) 转换为布尔 SA Mask [修正版]
+        # 逻辑: (mask > 0) -> 1变成True(保留), 0变成False(屏蔽)
+        sa_bool_mask = (sa_mask > 0) # [B, L_total]
+        # 💥 8.2) 构造 VL (Cross-Attention) 布尔 Mask [修正版]
+        # 逻辑: (mask > 0) -> 1变成True(保留), 0变成False(屏蔽)
+        vl_bool_mask = (vl_attn_mask > 0) # [B, L_vl]
+
+
+        # 🔥【修改点 2】转换 SA Mask 为加性 Mask
+        # sa_additive_mask = to_additive_mask(sa_mask)
+        # # 🔥【修改点 3】由于 expand_batch 可能改变了 vl_mask 的 batch size，
+        # vl_final_mask_1_0 = backbone_output.backbone_attention_mask # 取出可能被 expand 过的 1/0 mask
+        # vl_final_additive_mask = to_additive_mask(vl_final_mask_1_0)
+
+        # ------------------ 9) 调用 DiT (传入布尔掩码) ------------------
+        model_output = self.model(
+            hidden_states=sa_embs,
+            encoder_hidden_states=vl_embs,
+
+            # 🔥加性 Mask
+            # attention_mask=sa_additive_mask,             # 对应 Self-Attention
+            # encoder_attention_mask=vl_final_additive_mask, # 对应 Cross-Attention
+            # bool形mask
+            attention_mask=sa_bool_mask,             # DiT Self-Attention
+            encoder_attention_mask=vl_bool_mask,     # DiT Cross-Attention (通过 attention_mask 参数在内部传入)
+            timestep=t_discretized,
+            return_all_hidden_states=False,
+        )
+
+        # ------------------ 10) decode + loss ------------------
+        pred = self.action_decoder(model_output, embodiment_id) 
+        pred_actions = pred[:, -actions.shape[1] :] 
+
+        loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
+        loss = loss.sum() / action_mask.sum()
+
+        return BatchFeature(data={"loss": loss})
+
+    @torch.no_grad()
+    def get_action(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
+
+        backbone_output = self.process_backbone_output(backbone_output)
+
+        # Get vision and language embeddings.
+        vl_embs = backbone_output.backbone_features
+        embodiment_id = action_input.embodiment_id
+
+        # Embed state.
+        state_features = self.state_encoder(action_input.state, embodiment_id)
+
+        # Set initial actions as the sampled noise.
+        batch_size = vl_embs.shape[0]
+        device = vl_embs.device
+
+
+        # ==========================================
+        # 🟢 [新增] 1. 推理时获取 Keyframe Counts
+        # ==========================================
+        if hasattr(action_input, "keyframe_counts"):
+            kf_counts = action_input.keyframe_counts
+            if kf_counts.ndim == 2: kf_counts = kf_counts.squeeze(-1)
+        else:
+            kf_counts = torch.zeros((batch_size,), dtype=torch.long, device=device)
+        
+        kf_counts = torch.clamp(kf_counts, min=0, max=self.config.max_keyframe_count - 1)
+        kf_count_feature = self.kf_count_embedding(kf_counts).unsqueeze(1)
+
+
+        actions = torch.randn(
+            size=(batch_size, self.config.action_horizon, self.config.action_dim),
+            dtype=vl_embs.dtype,
+            device=device,
+        )
+
+        num_steps = self.num_inference_timesteps
+        dt = 1.0 / num_steps
+
+        # Run denoising steps.
+        for t in range(num_steps):
+            t_cont = t / float(num_steps)  # e.g. goes 0, 1/N, 2/N, ...
+            t_discretized = int(t_cont * self.num_timestep_buckets)
+
+            # Embed noised action trajectory.
+            timesteps_tensor = torch.full(
+                size=(batch_size,), fill_value=t_discretized, device=device
+            )
+            action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
+            # Maybe add position embedding.
+            if self.config.add_pos_embed:
+                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+                action_features = action_features + pos_embs
+
+            # Join vision, language, state and action embedding along sequence dimension.
+            future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
+            # sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+
+            # 🟢 [修改] 2. 拼接 sa_embs (必须与 forward 顺序一致)
+            sa_embs = torch.cat(
+                [state_features, kf_count_feature, future_tokens, action_features], 
+                dim=1
+            )
+
+            # Run model forward.
+            model_output = self.model(
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embs,
+                timestep=timesteps_tensor,
+            )
+            pred = self.action_decoder(model_output, embodiment_id)
+
+            pred_velocity = pred[:, -self.action_horizon :]
+
+            # Update actions using euler integration.
+            actions = actions + dt * pred_velocity
+        return BatchFeature(data={"action_pred": actions})
+
+    @property
+    def device(self):
+        return next(iter(self.parameters())).device
+
+    @property
+    def dtype(self):
+        return next(iter(self.parameters())).dtype
