@@ -7,18 +7,18 @@ We presented Keyframe-Chaining VLA, resolving non-Markovian ambiguity via Sparse
 ## 🛠️ Preparation
 Here we provide a conda environment setup for the project.
 ```bash
-   # clone the repository
-    git clone https://github.com/cyp123cyp/KC-VLA.git
-    cd KC-VLA
+# clone the repository
+git clone https://github.com/cyp123cyp/KC-VLA.git
+cd KC-VLA
     
-   conda create -n kcvla python=3.10
-   conda activate kcvla
-   # install dependencies
-   pip install -r requirements.txt
-   # Install ffmpeg (required only for torchcodec(real-bot))
-   conda install -c conda-forge ffmpeg==7.1.1
-   # Install Flash Attention (required for efficient VLA inference)
-   pip install --no-build-isolation flash-attn==2.7.1.post4
+conda create -n kcvla python=3.10
+conda activate kcvla
+# install dependencies
+pip install -r requirements.txt
+# Install ffmpeg (required only for torchcodec(real-bot))
+conda install -c conda-forge ffmpeg==7.1.1
+# Install Flash Attention (required for efficient VLA inference)
+pip install --no-build-isolation flash-attn==2.7.1.post4
 ```
 
 ## Dataset
@@ -32,7 +32,7 @@ While we utilize [ManiSkill](https://github.com/haosulab/ManiSkill) as our simul
 1. Generate via Our Collection Pipeline
 You can reproduce our data collection process or generate new trajectories for our 4 custom tasks by running our pipeline:
 ```bash
-    bash mani_skill/examples/motionplanning/panda/collectdata.sh
+bash mani_skill/examples/motionplanning/panda/collectdata.sh
 ```
 2. Download from Hugging Face
 You can also download from [Hugging Face](https://huggingface.co/datasets/furry123/ManiSkill-Memory-dependence).
@@ -40,12 +40,12 @@ You can also download from [Hugging Face](https://huggingface.co/datasets/furry1
 ## Training
 1. Training the keyframe selection module
 ```bash
-   python keyframe_selection_module/train_stage1.py
-   python keyframe_selection_module/train_stage2.py
+python keyframe_selection_module/train_stage1.py
+python keyframe_selection_module/train_stage2.py
 ```
 2. Training Keyframe Chaining VLA
 ```bash
-   python scripts/gr00t_finetune.py
+python scripts/gr00t_finetune.py
 ```
 
 ## Evaluation
@@ -53,20 +53,20 @@ The evaluation is deployed in a client–server architecture, where the policy m
 
 Step 1: Launch the Policy Service(use kcvla Environment)
 ```bash
-    # Start the policy inference service
-    python scripts/inference_service.py
+# Start the policy inference service
+python scripts/inference_service.py
 ```
 
 Step 2: Launch the ManiSkill Client(use Maniskill Environment)
 ```bash
-    # Start the ManiSkill client
-    python evaluate/eval_for_maniskill.py
+# Start the ManiSkill client
+python evaluate/eval_for_maniskill.py
 ```
 
 ## Acknowledgments
-[ManiSkill](https://github.com/haosulab/ManiSkill) - Original framework
-[SAPIEN](https://sapien.ucsd.edu/) - Physics simulation engine
-[Issac GR00T](https://github.com/NVIDIA/Isaac-GR00T) - VLA base model
+-[ManiSkill](https://github.com/haosulab/ManiSkill) - Original Robotics Simulation
+-[SAPIEN](https://sapien.ucsd.edu/) - Physics simulation engine
+-[Issac GR00T](https://github.com/NVIDIA/Isaac-GR00T) - VLA base model
 
 ## 📝 Citation
 If you find this project or the custom ManiSkill benchmark useful for your research, please consider citing:
