@@ -11,20 +11,19 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data.stage1_dataset import MultiTaskContrastiveDataset 
 from model.stage1_network import ResNetContrastive
 
-# ================= 配置 =================
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 BATCH_SIZE = 64
 LR = 1e-4
-EPOCHS = 30 # 🟢 去除 LAMBDA_TASK
+EPOCHS = 30 
 
 TASKS_CONFIG = {
-    0: "/home/chenyipeng/data/maniskill_data/lerobot_datasets/PickPlaceThreetimes-v1/panda_wristcam",
-    1: "/home/chenyipeng/data/maniskill_data/lerobot_datasets/PushCubeWithSignal-v1_version1/panda_wristcam",
-    2: "/home/chenyipeng/data/maniskill_data/lerobot_datasets/TeacherArmShuffle-v1_version2/panda_wristcam",
-    3: "/home/chenyipeng/data/maniskill_data/lerobot_datasets/SwapThreeCubes-v1_version2/panda_wristcam"  
+    0: "path/to/your/maniskill_data/PickPlaceThreetimes-v1",
+    1: "path/to/your/maniskill_data/PushCubeWithSignal-v1",
+    2: "path/to/your/maniskill_data/TeacherArmShuffle-v1",
+    3: "path/to/your/maniskill_data/SwapThreeCubes-v1"  
 }
 
-SAVE_DIR = "/home/chenyipeng/my-Isaac-GR00T/keyframe_detection_module_multitask/checkpoints/stage1_final_version2"
+SAVE_DIR = "./checkpoints/stage1"
 
 def train():
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -39,11 +38,8 @@ def train():
     dataset = MultiTaskContrastiveDataset(TASKS_CONFIG, transform=transform)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True)
 
-    # 🟢 模型不再需要 num_tasks 参数
     model = ResNetContrastive().to(DEVICE)
     
-    # 由于只有 Triplet Loss，可以考虑将 Margin 稍微调大一点 (例如 1.0 -> 2.0)
-    # 来补偿失去辅助损失带来的聚类压力
     criterion_triplet = nn.TripletMarginLoss(margin=1.0, p=2) 
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-3)
 
@@ -55,7 +51,6 @@ def train():
         
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{EPOCHS}")
         
-        # 🟢 仅接收三个图像
         for a_img, p_img, n_img in pbar:
             a_img, p_img, n_img = a_img.to(DEVICE), p_img.to(DEVICE), n_img.to(DEVICE)
             
@@ -64,8 +59,7 @@ def train():
             emb_a = model(a_img)
             emb_p = model(p_img)
             emb_n = model(n_img)
-            
-            # 🟢 纯 Triplet Loss
+
             loss = criterion_triplet(emb_a, emb_p, emb_n)
             
             loss.backward()

@@ -76,13 +76,12 @@ class KeyframeDataset(Dataset):
                 valid_indices = indices[1:] 
                 total_phases = len(valid_indices)
 
-                # 🟢 记录该任务是否为突变型任务（例如 Task 2）
                 is_abrupt_task = (task_id == 1)
 
                 for phase_id, kf_idx in enumerate(valid_indices):
                     if kf_idx >= vid_len: continue
                     
-                    # --- 1. 正样本 (Label 1.0) ---
+                    # --- 1. (Label 1.0) ---
                     pos_offsets = [0] if is_abrupt_task else [-1, 0, 1]
                     for offset in pos_offsets:
                         t = np.clip(kf_idx + offset, 0, vid_len - 1)
@@ -92,8 +91,7 @@ class KeyframeDataset(Dataset):
                             'video_len': vid_len, 'label': 1.0
                         })
 
-                    # --- 2. 轨迹负样本 (Label 0.0) ---
-                    # 每段轨迹采样数量改为 4 个
+                    # --- 2. (Label 0.0) ---
                     traj_start = 0 if phase_id == 0 else valid_indices[phase_id - 1]
                     traj_end = kf_idx
                     
@@ -102,7 +100,6 @@ class KeyframeDataset(Dataset):
                     safe_end = traj_end - safe_margin
                     
                     if safe_end > safe_start:
-                        # 🟢 修改点：将轨迹平分为 4 段
                         num_neg_per_segment = 4
                         segment_len = (safe_end - safe_start) / float(num_neg_per_segment)
                         for seg_i in range(num_neg_per_segment):
@@ -116,7 +113,7 @@ class KeyframeDataset(Dataset):
                                     'video_len': vid_len, 'label': 0.0
                                 })
                     
-                    # --- 3. 错位负样本 (Label 0.0) ---
+                    # --- 3. (Label 0.0) ---
                     if phase_id + 1 < total_phases:
                         self.samples.append({
                             'video_path': vid_path, 'center_idx': kf_idx,

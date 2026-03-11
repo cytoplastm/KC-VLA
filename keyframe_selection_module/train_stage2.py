@@ -6,14 +6,11 @@ from tqdm import tqdm
 import os
 import sys
 import numpy as np
-
-# 路径设置
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from data.dataset import KeyframeDataset 
 from model.network import TransformerKeyframeSelector
 
-# === 配置 ===
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 BATCH_SIZE = 32
 EPOCHS = 50
@@ -22,15 +19,15 @@ WINDOW_SIZE = 3
 
 # 任务配置
 TASKS_CONFIG = {
-    0: "/home/chenyipeng/data/maniskill_data/lerobot_datasets/PickPlaceThreetimes-v1/panda_wristcam",
-    1: "/home/chenyipeng/data/maniskill_data/lerobot_datasets/PushCubeWithSignal-v1_version1/panda_wristcam",
-    2: "/home/chenyipeng/data/maniskill_data/lerobot_datasets/TeacherArmShuffle-v1_version2/panda_wristcam",
-    3: "/home/chenyipeng/data/maniskill_data/lerobot_datasets/SwapThreeCubes-v1_version2/panda_wristcam"
+    0: "path/to/your/maniskill_data/PickPlaceThreetimes-v1",
+    1: "path/to/your/maniskill_data/PushCubeWithSignal-v1",
+    2: "path/to/your/maniskill_data/TeacherArmShuffle-v1",
+    3: "path/to/your/maniskill_data/SwapThreeCubes-v1"  
 }
 
 # 权重路径
-STAGE1_WEIGHTS = "/home/chenyipeng/my-Isaac-GR00T/keyframe_detection_module_multitask/checkpoints/stage1_final_version2/backbone_epoch_30.pth"
-SAVE_DIR = "/home/chenyipeng/my-Isaac-GR00T/keyframe_detection_module_multitask/checkpoints/stage2_final_version2"
+STAGE1_WEIGHTS = "path/to/stage1_checkpoint"
+SAVE_DIR = "./checkpoint/stage2"
 
 def evaluate(model, val_loader, criterion):
     model.eval()

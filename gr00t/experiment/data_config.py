@@ -154,9 +154,6 @@ class PANDADataConfig(BaseDataConfig):
     action_keys = ["action.position","action.rotation","action.gripper"]
     language_keys = ["annotation.human.task_description"]
     observation_indices = [-5,-4,-3,-2,-1,0]
-    # observation_indices = [-1,0]
-    # 新增：State 专用的 indices，只取当前帧 [0]
-    # state_indices = [0]
     action_indices = list(range(16))
 
     def transform(self):

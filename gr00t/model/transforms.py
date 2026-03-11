@@ -112,47 +112,6 @@ def is_valid_frame(self, frame_data):
     return frame_data in self.valid_frame_indices
 
 
-# def collate(features: List[dict], eagle_processor, get_frame_with_mask) -> dict:
-#     batch = {}
-#     keys = features[0].keys()
-
-#     for key in keys:
-#         values = [elem[key] for elem in features]
-
-#         if key == "eagle_content":
-#             # Process eagle content
-#             text_list = []
-#             image_inputs = []
-#             for v in values:
-#                 curr_text_list = v["text_list"]
-#                 curr_image_inputs = v["image_inputs"]
-#                 text_list += curr_text_list
-#                 image_inputs += curr_image_inputs
-#             eagle_inputs = eagle_processor(
-#                 text=text_list, images=image_inputs, return_tensors="pt", padding=True
-#             )
-#             for k, v in eagle_inputs.items():
-#                 k = "eagle_" + k
-#                 batch[k] = v
-#         elif key in ("pixel_values", "image_grid_thw"):
-#             # Process video frames
-#             frames = [get_frame_with_mask(v) for v in values]
-#             batch[key] = torch.cat(frames)
-#         elif key == "attention_mask":
-#             # Process attention mask
-#             mask = [get_attention_mask_for_frame(v) for v in values]
-#             batch[key] = torch.cat(mask)
-#         elif key == "obs_mask":
-#             # Process observation mask (optional)
-#             obs_mask = [v["obs_mask"] for v in values]
-#             batch["obs_mask"] = torch.cat(obs_mask)
-#             print(f"obs_mask in collate: {batch['obs_mask']}")  # 打印 obs_mask
-#         else:
-#             # Stack other keys
-#             batch[key] = torch.from_numpy(np.stack(values))
-#     return batch
-
-
 class DefaultDataCollator(DataCollatorMixin):
     def __init__(self, eagle_path: str = DEFAULT_EAGLE_PATH):
         super().__init__()

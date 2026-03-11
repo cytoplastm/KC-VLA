@@ -141,8 +141,7 @@ class LeRobotSingleDataset(Dataset):
             transforms if transforms is not None else ComposedModalityTransform(transforms=[])
         )
         
-        # 🔴 把 keyframes 存起来
-        self.keyframes = keyframes or {}   # 没有就给个空字典
+        self.keyframes = keyframes or {} 
 
         self._dataset_path = Path(dataset_path)
         self._dataset_name = self._dataset_path.name
@@ -189,11 +188,6 @@ class LeRobotSingleDataset(Dataset):
         self._check_integrity()
 
     def compute_obs_frames(self, trajectory_id: int, base_index: int) -> tuple[list[int], list[int]]:
-        """
-        返回:
-            frames: 长度固定为 MAX_OBS_FRAMES 的“绝对帧号”列表
-            mask:   同样长度; 1 表示真实观测帧, 0 表示左侧补出来的无效帧
-        """
         MAX_OBS_FRAMES = 6
 
         kfs = self.keyframes.get(trajectory_id, [])
@@ -211,7 +205,6 @@ class LeRobotSingleDataset(Dataset):
         else:
             frames = used
 
-        # 先假设全是真实帧
         mask = [1] * len(frames)
 
         if len(frames) < MAX_OBS_FRAMES:
@@ -580,106 +573,22 @@ class LeRobotSingleDataset(Dataset):
         trajectory_id, base_index = self.all_steps[index]
         return self.transforms(self.get_step_data(trajectory_id, base_index))
     
-    #关键帧版本(original)
-    # def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
-    #     """
-    #     返回某个 episode 中 base_index 这一步需要的所有原始数据（还没经过 transform）。
-
-    #     这里我们只对 video 做“关键帧多帧观测”的改动：
-    #     - video.* 用 compute_obs_frames 得到的一组 obs_frames 抽帧
-    #     - 其它 modality（state / action / language ...）仍然用原来 base_index 那一小段窗口
-    #     """
-    #     data: dict = {}
-
-    #     # 缓存当前轨迹的 parquet（后面 get_video_multi 要用 timestamp）
-    #     self.curr_traj_data = self.get_trajectory_data(trajectory_id)
-
-    #     # ⭐ 关键帧 + mask：比如 frames = [0, 0, 30, 50]，mask = [0, 1, 1, 1]
-    #     obs_frames, obs_mask = self.compute_obs_frames(trajectory_id, base_index)
-    #     obs_mask = np.asarray(obs_mask, dtype=bool)  # shape [T_obs]
-
-    #     # 遍历各个 modality
-    #     for modality in self.modality_keys:
-    #         keys = self.modality_keys[modality]
-
-    #         # ---- 1) video：用关键帧列表 obs_frames 取多帧 ----
-    #         if modality == "video":
-    #             for key in keys:
-    #                 # key 形如 "video.observation.images.ego_view"
-    #                 # 返回 shape: [T_obs, H, W, C]
-    #                 data[key] = self.get_video_multi(
-    #                     trajectory_id=trajectory_id,
-    #                     key=key,
-    #                     frame_indices=obs_frames,
-    #                 )
-
-    #         # ---- 2) 其他模态：保持原逻辑，用 base_index + delta_indices ----
-    #         else:
-    #             for key in keys:
-    #                 data[key] = self.get_data_by_modality(
-    #                     trajectory_id=trajectory_id,
-    #                     modality=modality,
-    #                     key=key,
-    #                     base_index=base_index,
-    #                 )
-
-    #     # ⭐ 把时间 mask 一并塞进 data，后面的 GR00TTransform 会用到
-    #     # 注意：这是长度 = T_obs 的一维 bool 向量
-    #     data["obs_mask"] = obs_mask
-    #     # print(
-    #     #     f"traj {trajectory_id}, step {base_index}, "
-    #     #     f"frames={obs_frames}, mask={obs_mask}"
-    #     # )
-    #     return data
     
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
         data: dict = {}
-        # 1. 准备工作
+
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
-        # 获取关键帧索引，例如 [0, 30, 50]
+
         obs_frames, obs_mask = self.compute_obs_frames(trajectory_id, base_index)
         obs_mask = np.asarray(obs_mask, dtype=bool)
-        #🟢 [新增] 计算当前是第几个关键帧之后（Phase Indicator）
-        # 这里的 obs_frames 是经过截断的（只有最后 max_obs_frames 个）
-        # 我们需要的是该轨迹截至目前为止 *所有* 有效关键帧的数量  
-        # 1. 获取该轨迹的所有关键帧
         all_kfs = self.keyframes.get(trajectory_id, [])
         all_kfs = sorted(set(all_kfs))         
-        # 2. 计算 <= base_index 的关键帧数量
-        # 例如 base_index=80, all_kfs=[0, 30, 50, 90] -> count=3 (0, 30, 50)
-        # 这里的逻辑和 compute_obs_frames 中的 `used` 列表长度逻辑一致
+
         valid_kfs_count = sum(1 for k in all_kfs if k <= base_index)
         
-        # 3. 如果当前帧 base_index 本身不是关键帧，但作为最新的观测被加入了
-        # 逻辑上它属于“最新状态”，可以视为一个新的临时关键帧，或者归入上一个阶段
-        # 这里取决于你的定义：
-        # - 定义 A: 阶段 = 已经经过的 *历史* 关键帧数量 (不含当前正在进行的动作)
-        # - 定义 B: 阶段 = 当前观测序列的有效长度 (含当前帧)
-        
-        # 建议使用 定义 A (历史关键帧数量)，更能代表“任务进度”
-        # data["keyframe_counts"] = np.array([valid_kfs_count], dtype=np.int64)
-        # data["keyframe_counts"] = np.array([valid_kfs_count], dtype=np.int64)
-        # data["task_phase"] = np.array([valid_kfs_count], dtype=np.int64)
-        # =============================================================
-        # 🟢 [调试打印] 建议仅在特定条件下触发，防止日志爆炸
-        # =============================================================
-        # 例如：只打印第一个 trajectory 的数据，或者随机打印
-        # if trajectory_id == 0 and base_index % 50 == 0: 
-        # import random
-        # if random.random() < 0.1:  # 0.1% 的概率打印，或者改为 True 强制打印
-        #     print(f"\n[DEBUG Dataset] Traj ID: {trajectory_id} | Curr Step: {base_index}")
-        #     print(f"  > All Keyframes:   {all_kfs}")
-        #     print(f"  > Input Frames:    {obs_frames} (用于取图)")
-        #     print(f"  > Obs Mask:        {obs_mask.tolist()}")
-        #     print(f"  > Calculated Count:{valid_kfs_count} (Phase ID)")
-        #     print(f"  > Check Logic:     {valid_kfs_count} kfs <= {base_index} ?")
-        #     print("-" * 60)
-        # =============================================================
-
         for modality in self.modality_keys:
             keys = self.modality_keys[modality]
 
-            # ----------------- 1) Video 处理 (保持不变) -----------------
             if modality == "video":
                 for key in keys:
                     data[key] = self.get_video_multi(
@@ -688,48 +597,35 @@ class LeRobotSingleDataset(Dataset):
                         frame_indices=obs_frames,
                     )
 
-            # ----------------- 2) State 处理 (🔴 必须修改) -----------------
             elif modality == "state":
-                # 我们希望 State 和 Video 严格对齐，使用同样的 obs_frames
+
                 for key in keys:
-                    # 构造完整的 key，例如 "state.eef_pos"
+
                     full_key = key if key.startswith("state.") else f"state.{key}"
                     
-                    # 取出 lerobot 原始 key (比如 state.eef_pos 对应 parquet 里的 observation.state)
-                    # 这一步逻辑是从 get_state_or_action 抄过来的
                     key_suffix = full_key.replace("state.", "")
                     le_cfg = self.lerobot_modality_meta.state[key_suffix]
                     le_key = le_cfg.original_key or key_suffix
                     
-                    # 从 parquet 缓存中读取整条轨迹的数据
-                    # shape: [T_total, D]
                     full_traj_arr = np.stack(self.curr_traj_data[le_key]) 
-                    
-                    # 确保是 2D array
+
                     if full_traj_arr.ndim == 1:
                         full_traj_arr = full_traj_arr.reshape(-1, 1)
                         
-                    # 截取该特征对应的维度 (start:end)
                     feature_indices = np.arange(le_cfg.start, le_cfg.end)
                     full_traj_arr = full_traj_arr[:, feature_indices] # shape [T_total, dim]
 
-                    # 🔴 核心修改：直接使用 obs_frames 作为索引提取数据
-                    # step_indices 就是 obs_frames (e.g. [0, 30, 50])
-                    # 注意：retrieve_data_and_pad 会处理越界（比如帧号<0的情况）
                     traj_len = self.trajectory_lengths[self.get_trajectory_index(trajectory_id)]
                     
                     state_data = self.retrieve_data_and_pad(
                         array=full_traj_arr,
-                        step_indices=np.array(obs_frames), # 这里强制使用关键帧索引
+                        step_indices=np.array(obs_frames), 
                         max_length=traj_len,
                         padding_strategy="first_last" if le_cfg.absolute else "zero"
                     )
                     
                     data[key] = state_data
 
-            # ----------------- 3) Action / Language (保持原样) -----------------
-            # Action 通常预测未来，与观测历史(Video/State)的采样策略不同
-            # Language 是全局的
             else:
                 for key in keys:
                     data[key] = self.get_data_by_modality(
@@ -741,7 +637,6 @@ class LeRobotSingleDataset(Dataset):
 
         data["obs_mask"] = obs_mask
         return data
-
 
     def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:
         """Get the data for a trajectory."""
@@ -876,38 +771,6 @@ class LeRobotSingleDataset(Dataset):
             video_backend=self.video_backend,
             video_backend_kwargs=self.video_backend_kwargs,
         )
-    
-    # 关键帧版本
-    # def get_video(self, trajectory_id: int, key: str, base_index: int) -> np.ndarray:
-    #     """
-    #     返回 shape = (T_obs, H, W, C)
-    #     其中 T_obs 是你想要的观测帧数，比如 4
-    #     """
-    #     # 1) 原来是用 delta_indices：
-    #     # step_indices = self.delta_indices[key] + base_index
-
-    #     # 现在改成用你的关键帧逻辑：
-    #     obs_frames = self.compute_obs_frames(trajectory_id, base_index)  # 比如 [0,30,50,80] or [0,0,30,32]
-    #     step_indices = np.array(obs_frames)
-
-    #     # 2) 后面基本可以照抄原逻辑
-    #     trajectory_index = self.get_trajectory_index(trajectory_id)
-    #     step_indices = np.maximum(step_indices, 0)
-    #     step_indices = np.minimum(step_indices, self.trajectory_lengths[trajectory_index] - 1)
-
-    #     key_no_prefix = key.replace("video.", "")
-    #     video_path = self.get_video_path(trajectory_id, key_no_prefix)
-
-    #     assert self.curr_traj_data is not None
-    #     timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
-    #     video_timestamp = timestamp[step_indices]
-
-    #     return get_frames_by_timestamps(
-    #         video_path.as_posix(),
-    #         video_timestamp,
-    #         video_backend=self.video_backend,
-    #         video_backend_kwargs=self.video_backend_kwargs,
-    #     )
     
     def get_video_multi(
         self,

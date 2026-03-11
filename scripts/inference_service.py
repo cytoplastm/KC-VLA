@@ -40,16 +40,11 @@ You can use bore to forward the port to your client: `159.223.171.199` is bore.p
     bore local 8000 --to 159.223.171.199
 """
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import sys
-from pathlib import Path
-# 把新项目路径插入到 sys.path 最前
-# sys.path.insert(0, str(Path("/home/liuchenyu/project/mpvla0").resolve()))
-sys.path.insert(0, str(Path("/home/chenyipeng/my-Isaac-GR00T").resolve()))
 import time
 from dataclasses import dataclass
 from typing import Literal
-
 import numpy as np
 import tyro
   
@@ -61,8 +56,7 @@ from gr00t.model.policy import Gr00tPolicy
 @dataclass
 class ArgsConfig:
     """Command line arguments for the inference service."""
-    #"/data1/chenyipeng/Isaac-GR00T/real_world_pick_place_three_history=keyframe4_prompt_modify_step=50000/checkpoint-16000"
-    model_path: str = "/data1/chenyipeng/Isaac-GR00T/mix_data_history=keyframe5_prompt_modify"
+    model_path: str = "path to model checkpoint"
     """Path to the model checkpoint directory."""
 
     embodiment_tag: Literal[tuple(EMBODIMENT_TAG_MAPPING.keys())] = "new_embodiment"
@@ -76,7 +70,7 @@ class ArgsConfig:
     See gr00t/experiment/data_config.py for more details.
     """
 
-    port: int = 5003
+    port: int = 5001
     """The port number for the server."""
 
     host: str = "0.0.0.0"
