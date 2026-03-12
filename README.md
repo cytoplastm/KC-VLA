@@ -15,9 +15,11 @@ cd KC-VLA
     
 conda create -n kcvla python=3.10
 conda activate kcvla
+
 # install dependencies
 pip install -r requirements.txt
 pip install -e .
+
 # Install ffmpeg (required only for torchcodec(real-bot))
 conda install -c conda-forge ffmpeg==7.1.1
 # Install Flash Attention (required for efficient VLA inference)
