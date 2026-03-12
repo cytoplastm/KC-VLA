@@ -58,6 +58,12 @@ python scripts/gr00t_finetune.py \
     --report-to tensorboard
 ```
 
+## 📦 Model Checkpoints
+
+We have released the fully trained checkpoints for both the **Keyframe Selection Module (KSM)** and the **Keyframe-Chaining VLA** model. You can download them directly from our Hugging Face model hub to quickly reproduce our results without training from scratch:
+
+👉 **[KC-VLA Model Checkpoints on Hugging Face](https://huggingface.co/furry123/KC-VLA-Memory-Dependence)**
+
 ## 📈 Evaluation
 
 The evaluation is deployed in a client–server architecture, where the policy model runs as a service and the ManiSkill environment interacts with it as a client. To evaluate the model on ManiSkill, follow the steps below.
