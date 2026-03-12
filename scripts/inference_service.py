@@ -41,13 +41,12 @@ You can use bore to forward the port to your client: `159.223.171.199` is bore.p
 """
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-import sys
 import time
 from dataclasses import dataclass
 from typing import Literal
 import numpy as np
 import tyro
-  
+
 from gr00t.data.embodiment_tags import EMBODIMENT_TAG_MAPPING
 from gr00t.eval.robot import RobotInferenceClient, RobotInferenceServer
 from gr00t.experiment.data_config import load_data_config

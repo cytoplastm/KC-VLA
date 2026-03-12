@@ -1,8 +1,6 @@
-"""Validation of maniskill - MODEL MODE: Optimized Stop Condition with Greedy Smoothing & ID Alignment & Immediate Candidate Usage
-"""
 import sys
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2" # 根据您的环境调整
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 import shutil
 import math
 import json
@@ -39,11 +37,12 @@ if project_root not in sys.path:
 try:
     from keyframe_selection_module.model.network import TransformerKeyframeSelector
 except ImportError as e:
+    print(f"❌ Error: Failed to import 'keyframe_selection_module'.")
     sys.exit(1)
 
 EMBODIMENT_TAGS = {"panda_wristcam": "panda"}
 
-TASKS = {"panda_wristcam": ["PickPlaceThreetimes-v1","TeacherArmShuffle-v1","PushCubeWithSignal-v1"]}
+TASKS = {"panda_wristcam": ["PickPlaceThreetimes-v1","TeacherArmShuffle-v1","PushCubeWithSignal-v1","SwapThreeCubes-v1"]}
 
 NAME_TO_ID = {
     "PickPlaceThreetimes-v1": 0,
@@ -104,11 +103,11 @@ class EvalConfig:
     save_video: bool = True
     save_results: Optional[str] = None
     
-    save_path: str = './result/video'
-    keyframe_save_path: Optional[str] = './result'
+    save_path: str = './evaluate/result/video'
+    keyframe_save_path: Optional[str] = '.evaluate/result'
 
     model_checkpoint: str = 'path to KSM checkpoint'
-    
+
     shader: str = "default"
     num_per_task: int = 50
 

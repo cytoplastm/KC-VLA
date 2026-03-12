@@ -2,3 +2,5 @@ __pycache__/
 *.pth
 ev
 evaluate/result
+result
+kc_vla.egg-info
