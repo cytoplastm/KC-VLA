@@ -50,13 +50,11 @@ def evaluate(model, val_loader, criterion):
                 elif p == 0 and l == 1: stats[tid]['fn'] += 1
                 else: stats[tid]['tn'] += 1
                     
-    print(f"\n📊 Evaluation Summary (Loss: {val_loss/len(val_loader):.4f}):")
     total_tp, total_fp, total_fn = 0, 0, 0
     for tid, s in stats.items():
         precision = s['tp'] / (s['tp'] + s['fp'] + 1e-6)
         recall = s['tp'] / (s['tp'] + s['fn'] + 1e-6)
         f1 = 2 * precision * recall / (precision + recall + 1e-6)
-        print(f"  Task {tid} | F1: {f1:.4f} | Prec: {precision:.4f} (误报:{s['fp']}) | Rec: {recall:.4f}")
         total_tp += s['tp']; total_fp += s['fp']; total_fn += s['fn']
         
     global_prec = total_tp / (total_tp + total_fp + 1e-6)
@@ -66,9 +64,6 @@ def evaluate(model, val_loader, criterion):
 
 def train_stage2():
     os.makedirs(SAVE_DIR, exist_ok=True)
-    
-    print("🚀 Stage 2 Training Start...")
-
     train_dataset = KeyframeDataset(TASKS_CONFIG, mode='train', context_length=WINDOW_SIZE)
     val_dataset = KeyframeDataset(TASKS_CONFIG, mode='val', context_length=WINDOW_SIZE)
     
