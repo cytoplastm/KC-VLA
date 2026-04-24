@@ -72,7 +72,7 @@ TASK_THRESHOLDS = {
     "SwapThreeCubes-v1": 0.49,
     "PushCubeWithSignal-v1": 0.49,
     "TeacherArmShuffle-v1": 0.47,
-    "PickPlaceThreetimes-v1": 0.91,
+    "PickPlaceThreetimes-v1": 0.96,
 }
 
 @dataclass
